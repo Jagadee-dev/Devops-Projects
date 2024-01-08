@@ -1,0 +1,215 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Parameters:
+  AppName:
+    Type: String
+    Description: "The name of your Elastic Beanstalk application"
+  EnvironmentName:
+    Type: String
+    Description: "The name of your Elastic Beanstalk environment"
+  DomainName:
+    Type: String
+    Description: "Your domain name"
+  ACMCertificateArn:
+    Type: String
+    Description: "ARN of your ACM certificate for HTTPS"
+
+Resources:
+  # S3 Bucket for Static Content
+  StaticContentBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      AccessControl: Private
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+
+  # CloudFront Distribution
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Origins:
+          - DomainName: !GetAtt StaticContentBucket.DomainName
+            Id: S3Origin
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+
+        Enabled: true
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ForwardedValues:
+            QueryString: false
+          ViewerProtocolPolicy: redirect-to-https
+        DefaultRootObject: index.html
+        ViewerCertificate:
+          AcmCertificateArn: !Ref ACMCertificateArn
+          SslSupportMethod: sni-only
+        PriceClass: PriceClass_100
+
+  # Route 53 DNS Record
+  DNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref "YourHostedZoneId"
+      Name: !Ref DomainName
+      Type: A
+      TTL: '60'
+      AliasTarget:
+        DNSName: !GetAtt CloudFrontDistribution.DomainName
+        HostedZoneId: Z2FDTNDATAQYW2  # CloudFront Hosted Zone ID
+
+  # Elastic Beanstalk Application
+  EBApplication:
+    Type: AWS::ElasticBeanstalk::Application
+    Properties:
+      ApplicationName: !Ref AppName
+
+  # Elastic Beanstalk Environment
+  EBEnvironment:
+    Type: AWS::ElasticBeanstalk::Environment
+    Properties:
+      ApplicationName: !Ref AppName
+      EnvironmentName: !Ref EnvironmentName
+      PlatformArn: "arn:aws:elasticbeanstalk:your-region::platform/Docker running on 64bit Amazon Linux 2/3.4.2"
+      SolutionStackName: "64bit Amazon Linux 2 v3.4.2 running Docker"
+      OptionSettings:
+        - Namespace: aws:autoscaling:launchconfiguration
+          OptionName: IamInstanceProfile
+          Value: aws-elasticbeanstalk-ec2-role
+        - Namespace: aws:elasticbeanstalk:environment
+          OptionName: EnvironmentType
+          Value: SingleInstance
+        - Namespace: aws:elasticbeanstalk:environment
+          OptionName: ServiceRole
+          Value: aws-elasticbeanstalk-service-role
+        - Namespace: aws:elasticbeanstalk:healthreporting:system
+          OptionName: SystemType
+          Value: enhanced
+        - Namespace: aws:elasticbeanstalk:command
+          OptionName: DeploymentPolicy
+          Value: Immutable
+
+  # RDS MySQL Database
+  MySQLDBCluster:
+    Type: AWS::RDS::DBCluster
+    Properties:
+      Engine: aurora
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref DBSecurityGroup
+
+  # Security Group for EC2 Instances
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security group for EC2 instances in private subnet"
+      VpcId: !Ref YourVpcId
+
+  # Security Group for RDS
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security group for RDS instances"
+      VpcId: !Ref YourVpcId
+
+  # VPC
+  YourVPC:
+    Type: "AWS::EC2::VPC"
+    Properties:
+      CidrBlock: "10.0.0.0/16"
+      EnableDnsSupport: "true"
+      EnableDnsHostnames: "true"
+      Tags:
+        - Key: Name
+          Value: YourVPC
+
+  # Private Subnet
+  PrivateSubnet:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      VpcId: !Ref YourVPC
+      AvailabilityZone: !Select
+        - 0
+        - Fn::GetAZs: ""
+      CidrBlock: "10.0.0.0/24"
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: PrivateSubnet
+
+  # Public Subnet
+  PublicSubnet:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      VpcId: !Ref YourVPC
+      AvailabilityZone: !Select
+        - 0
+        - Fn::GetAZs: ""
+      CidrBlock: "10.0.1.0/24"
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: PublicSubnet
+
+  # Internet Gateway
+  InternetGateway:
+    Type: "AWS::EC2::InternetGateway"
+    Properties:
+      Tags:
+        - Key: Name
+          Value: InternetGateway
+
+  # Attach Internet Gateway to VPC
+  AttachGateway:
+    Type: "AWS::EC2::VPCGatewayAttachment"
+    Properties:
+      VpcId: !Ref YourVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Route Table for Public Subnet
+  PublicRouteTable:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId: !Ref YourVPC
+      Tags:
+        - Key: Name
+          Value: PublicRouteTable
+
+  # Associate Public Subnet with Public Route Table
+  PublicSubnetRouteTableAssociation:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # Default Route for Public Subnet
+  PublicSubnetDefaultRoute:
+    Type: "AWS::EC2::Route"
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref InternetGateway
+
+  # Route Table for Private Subnet
+  PrivateRouteTable:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId: !Ref YourVPC
+      Tags:
+        - Key: Name
+          Value: PrivateRouteTable
+
+  # Associate Private Subnet with Private Route Table
+  PrivateSubnetRouteTableAssociation:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      SubnetId: !Ref PrivateSubnet
+      RouteTableId: !Ref PrivateRouteTable
+
+Outputs:
+  WebsiteURL:
+    Description: "URL for the website"
+    Value: !Sub "http://${DomainName}"
