@@ -1,0 +1,677 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: This template generates a generic CI/CD Pipeline for ECS deployment. Version 1.0
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups: 
+      - 
+        Label: 
+          default: "Naming Conventions"
+        Parameters: 
+          - ResourceNamePrefix
+          - EnvironmentType
+          - ServiceName
+          - TaskDefinitionName
+          - ECSServiceName
+          - ECRRepoName
+          - ClusterName
+      -
+        Label:
+          default: "WebHook Configurations"
+        Parameters:
+          - AutoDeployment
+          - GithubTokenSecretName
+      -
+        Label:
+          default: "S3 Configurations"
+        Parameters:
+          - PipelineArtifactsBucketName
+          - S3ObjectRetentionDays
+          - S3AccessLogBucketName
+          - CreateArtifactBucket
+          - S3BucketBuildEnvs
+      - 
+        Label: 
+          default: "CodeBuild Configurations"
+        Parameters: 
+          - CodebuildEnvironment
+          - EnvironmentComputeType
+          - BuildImageVersion
+          - SonarDetails
+      - 
+        Label: 
+          default: "Network Configurations"
+        Parameters: 
+          - VpcId
+          - AppSubnetIds
+          - ServerlessSgId
+      -
+        Label:
+          default: "CodePipeline Configurations"
+        Parameters:
+          - GithubRepoName
+          - GithubBranchName
+          - GithubUser
+          - ECRImageTagStoreName
+Parameters:
+  GithubRepoName: 
+    Description: Specify the Github Repository name.
+    Type: String
+    AllowedPattern: "[\\x20-\\x7E]*"    
+    ConstraintDescription: Can contain only ASCII characters.
+  GithubUser:
+    Type: String
+    Description: GitHub user where the repository lives.
+  GithubTokenSecretName: 
+    Description: Specify name of the secret manager name, where github token is stored.
+    Type: String
+  GithubBranchName: 
+    Description: Github Branch for the Github repo.
+    Type: String 
+    AllowedPattern: "[\\x20-\\x7E]*"
+    ConstraintDescription: Can contain only ASCII characters.
+  PipelineArtifactsBucketName:  
+    Type: String
+    Description: The S3 bucket where artifacts for the pipeline are stored.
+  S3AccessLogBucketName:
+    Type: String
+    Description: Enter the name of the S3 Bucket, where s3 access logs will be stored.
+  ResourceNamePrefix:
+    Type: String  
+    Description: Enter prefix for Resource Names
+  EnvironmentType:
+    Type: String
+    Description: Name your EnvironmentType According to your need 
+  ECRRepoName:
+    Description: Enter name of the ECR repository
+    Type: String
+  AutoDeployment:
+    Description: This option enables auto deployment for pipe line.
+    Type: String
+    AllowedValues: [true, false]
+  BuildImageVersion: 
+    Type: String
+    Description: The image version that identifies the Docker image to use for this build project.
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: The ID of Amazon VPC used for environment
+  AppSubnetIds: 
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: A list of two subnet IDS in your environment VPC
+  SonarDetails:
+    Type: CommaDelimitedList
+    Description: (Optional) Enter the value of Sonarcredentials secret name and Sonarqube Project name respectively. Ex- Los-Dev-SonarCredentials,Los-Loans-service
+  CodebuildEnvironment:
+    Type: String
+    Description: Enter the environment type for code build
+    AllowedValues:
+      - LINUX_CONTAINER
+      - WINDOWS_CONTAINER
+  EnvironmentComputeType:
+    Type: String
+    Description: Enter the environment compute type for code build
+  ClusterName:
+    Type: String
+    Description: Name of the cluster where ECS service is running.         
+  ServiceName:
+    Type: String
+    Description: Specify the name of the service.
+  ECSServiceName:
+    Type: String
+    Description: Enter the name of ECS service, to perform the force deployment once the image is built.
+  TaskDefinitionName:
+    Type: String
+    Description: Specify the ECS Takdefinition name of Service.
+  S3ObjectRetentionDays:
+    Type: CommaDelimitedList
+    Description: '(Required) Specify the s3 object retention days in following format: CurrentVersionExpirationInDays,NoncurrentVersionExpirationInDays. Min:30 Max:1000'
+  ECRImageTagStoreName:
+    Type: String
+    Description: Specify the SSM ParameterStore name for storing ECR Image Dynamic tag value.
+  CreateArtifactBucket:
+    Type: String
+    Description: Select true to create a new artifact bucket.
+    AllowedValues:
+      - true
+      - false
+  S3BucketBuildEnvs:
+    Type: CommaDelimitedList
+    Description: Enter the list of S3 bucket names environment variables to add in codebuild project.
+  ServerlessSgId:
+    Type: String
+Conditions:
+  ShouldCreateWebhook: !Equals [true, !Ref AutoDeployment]
+  IsloggingEnabled: !Equals [ !Ref PipelineArtifactsBucketName , true]
+  IsNewArtifactBucketRequired: !Equals [true, !Ref CreateArtifactBucket]
+  SonarProjectNameNotEmpty: !Not [ !Equals [ "None", !Select [1, !Ref SonarDetails]]]
+  S3EnvVar0Exist: !Equals [ !Select [ 0, !Ref S3BucketBuildEnvs ], "N:N" ]
+  S3EnvVar1Exist: !Equals [ !Select [ 1, !Ref S3BucketBuildEnvs ], "N:N" ]
+  S3EnvVar2Exist: !Equals [ !Select [ 2, !Ref S3BucketBuildEnvs ], "N:N" ]
+  S3EnvVar3Exist: !Equals [ !Select [ 3, !Ref S3BucketBuildEnvs ], "N:N" ]
+  S3EnvVar4Exist: !Equals [ !Select [ 4, !Ref S3BucketBuildEnvs ], "N:N" ]
+Resources:
+  Webhook:
+    Type: AWS::CodePipeline::Webhook
+    Condition: ShouldCreateWebhook
+    Properties:
+      Name: !Sub '${ResourceNamePrefix}-${EnvironmentType}-${ServiceName}-CodepipelineWebhook'
+      AuthenticationConfiguration:
+        SecretToken: !Sub '{{resolve:secretsmanager:${GithubTokenSecretName}:SecretString:GithubToken}}'
+      Filters:
+      - JsonPath: "$.ref"  
+        MatchEquals: refs/heads/{Branch}   
+      Authentication: GITHUB_HMAC  
+      TargetPipeline:
+        Ref: Pipeline
+      TargetAction: Source
+      TargetPipelineVersion:
+        Fn::GetAtt:
+        - Pipeline
+        - Version
+      RegisterWithThirdParty: 'true'
+  ArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Condition: IsNewArtifactBucketRequired
+    Properties:
+      BucketName: !Ref PipelineArtifactsBucketName
+      LoggingConfiguration:
+       !If
+       - IsloggingEnabled
+       - DestinationBucketName: !Ref S3AccessLogBucketName
+         LogFilePrefix: !Sub '${PipelineArtifactsBucketName}/'
+       - !Ref "AWS::NoValue"
+      Tags:
+        - 
+          Key: Name
+          Value: !Sub '${ResourceNamePrefix}-${EnvironmentType}-${ServiceName}-Artifacts-Bucket'
+        -
+          Key: ApplicationRole
+          Value: Artifact-Bucket
+      AccessControl: Private
+      PublicAccessBlockConfiguration:
+          BlockPublicAcls: true
+          BlockPublicPolicy: true
+          IgnorePublicAcls: true
+          RestrictPublicBuckets: true
+      BucketEncryption:
+          ServerSideEncryptionConfiguration:
+            - ServerSideEncryptionByDefault:
+                SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - ExpirationInDays: !Select [ 0 , !Ref S3ObjectRetentionDays ]
+            NoncurrentVersionExpirationInDays: !Select [ 1 , !Ref S3ObjectRetentionDays ]
+            Status: Enabled
+            Id: !Sub '${ResourceNamePrefix}-${EnvironmentType}-Default-Delete-Rule'
+  ArtifactsBucketPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    Condition: IsNewArtifactBucketRequired
+    Properties:
+      Bucket: !Ref ArtifactsBucket
+      PolicyDocument:
+        Statement:
+          - Sid: AllowSSLRequestsOnly
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !Sub 'arn:aws:s3:::${ArtifactsBucket}'
+              - !Sub 'arn:aws:s3:::${ArtifactsBucket}/*'
+            Condition:
+             Bool:
+              aws:SecureTransport: 'false'
+  CodePipelineExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Tags:
+        - 
+          Key: Name
+          Value: !Sub '${ResourceNamePrefix}-${EnvironmentType}-${ServiceName}-CodePipeline-ExecutionRole'
+        -
+          Key: ApplicationRole
+          Value: !Sub '${ServiceName}-Iam'
+      RoleName: !Sub '${ResourceNamePrefix}-${EnvironmentType}-${ServiceName}-CodePipeline-ExecutionRole'  
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - codepipeline.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: !Sub '${ResourceNamePrefix}-${EnvironmentType}-${ServiceName}-CodePipelinePolicy'
+        PolicyDocument:
+          Statement:
+          - Action:
+            - codebuild:ListBuilds
+            - codebuild:ListProjects
+            - codebuild:ListRepositories
+            Resource: "*"
+            Effect: Allow
+          - Action:
+            - codebuild:ListBuildsForProject
+            - codebuild:BatchGetBuilds
+            - codebuild:BatchGetProjects
+            - codebuild:StartBuild
+            Resource:
+            - !Sub 'arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:project/${ResourceNamePrefix}-${EnvironmentType}-${ServiceName}-CodeBuild-Project'
+            Effect: Allow
+          - Action:
+            - s3:GetObject
+            - s3:PutObject
+            Resource:
+            - Fn::Sub: arn:aws:s3:::${PipelineArtifactsBucketName}/*
+            Effect: Allow
+          - Action:
+            - s3:ListBucket
+            Resource:
+            - Fn::Sub: arn:aws:s3:::${PipelineArtifactsBucketName}
+            Effect: Allow
+          - Effect: Allow
+            Action:
+            - codepipeline:PutJobSuccessResult
+            - codepipeline:PutJobFailureResult
+            Resource:
+            - "*"
+          Version: '2012-10-17'
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ResourceNamePrefix}-${EnvironmentType}-${ServiceName}-CodeBuildServiceRole'
+      Tags: 
+        - 
+          Key: Name
+          Value: !Sub '${ResourceNamePrefix}--${EnvironmentType}-${ServiceName}-CodeBuildServiceRole'
+          
+        -
+          Key: ApplicationRole 
+          Value: !Sub '${ServiceName}-Iam'
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - codebuild.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - !If
+        - S3EnvVar0Exist
+        - !Ref 'AWS::NoValue'
+        - PolicyName: !Sub '${ResourceNamePrefix}-${EnvironmentType}-${ServiceName}-CodeBuildArtifactsBucket'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - 
+                Effect: Allow
+                Action: 
+                  - 's3:GetObject'
+                  - 's3:GetObjectVersion'
+                  - 's3:PutObject'
+                Resource:
+                  - !Sub 'arn:aws:s3:::${PipelineArtifactsBucketName}/*'
+                  - !Sub 'arn:aws:s3:::${PipelineArtifactsBucketName}'
+                  - !Join 
+                      - ''
+                      - - 'arn:aws:s3:::'
+                        - !Select [ 1, !Split [ ':', !Select [ 0, !Ref S3BucketBuildEnvs ] ] ]
+                        - /*
+                  - !Join 
+                      - ''
+                      - - 'arn:aws:s3:::'
+                        - !Select [ 1, !Split [ ':', !Select [ 0, !Ref S3BucketBuildEnvs ] ] ]
+                  - !If
+                      - S3EnvVar1Exist
+                      - !Ref 'AWS::NoValue'
+                      - !Join 
+                          - ''
+                          - - 'arn:aws:s3:::'
+                            - !Select [ 1, !Split [ ':', !Select [ 1, !Ref S3BucketBuildEnvs ] ] ]
+                            - /*
+                  - !If
+                      - S3EnvVar1Exist
+                      - !Ref 'AWS::NoValue'
+                      - !Join 
+                          - ''
+                          - - 'arn:aws:s3:::'
+                            - !Select [ 1, !Split [ ':', !Select [ 1, !Ref S3BucketBuildEnvs ] ] ]
+                  - !If
+                      - S3EnvVar2Exist
+                      - !Ref 'AWS::NoValue'
+                      - !Join 
+                          - ''
+                          - - 'arn:aws:s3:::'
+                            - !Select [ 1, !Split [ ':', !Select [ 2, !Ref S3BucketBuildEnvs ] ] ]
+                            - /*
+                  - !If
+                      - S3EnvVar2Exist
+                      - !Ref 'AWS::NoValue'
+                      - !Join 
+                          - ''
+                          - - 'arn:aws:s3:::'
+                            - !Select [ 1, !Split [ ':', !Select [ 2, !Ref S3BucketBuildEnvs ] ] ]
+                  - !If
+                      - S3EnvVar3Exist
+                      - !Ref 'AWS::NoValue'
+                      - !Join 
+                          - ''
+                          - - 'arn:aws:s3:::'
+                            - !Select [ 1, !Split [ ':', !Select [ 3, !Ref S3BucketBuildEnvs ] ] ]
+                            - /*
+                  - !If
+                      - S3EnvVar3Exist
+                      - !Ref 'AWS::NoValue'
+                      - !Join 
+                          - ''
+                          - - 'arn:aws:s3:::'
+                            - !Select [ 1, !Split [ ':', !Select [ 3, !Ref S3BucketBuildEnvs ] ] ]
+                  - !If
+                      - S3EnvVar4Exist
+                      - !Ref 'AWS::NoValue'
+                      - !Join 
+                          - ''
+                          - - 'arn:aws:s3:::'
+                            - !Select [ 1, !Split [ ':', !Select [ 4, !Ref S3BucketBuildEnvs ] ] ]
+                            - /*
+                  - !If
+                      - S3EnvVar4Exist
+                      - !Ref 'AWS::NoValue'
+                      - !Join 
+                          - ''
+                          - - 'arn:aws:s3:::'
+                            - !Select [ 1, !Split [ ':', !Select [ 4, !Ref S3BucketBuildEnvs ] ] ]
+      - PolicyName: !Sub '${ResourceNamePrefix}-${EnvironmentType}-${ServiceName}-Parameter-Store'
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+              - ec2:CreateNetworkInterface
+              - ec2:DescribeDhcpOptions
+              - ec2:DescribeNetworkInterfaces
+              - ec2:DeleteNetworkInterface
+              - ec2:DescribeSubnets
+              - ec2:DescribeSecurityGroups
+              - ec2:DescribeVpcs
+              Resource:
+              - "*"
+      - PolicyName: CodeBuild-ParameterStore
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action: 
+            - ssm:GetParameters
+            - ssm:PutParameter
+            Resource:
+              - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ECRImageTagStoreName}'
+      - PolicyName: !Sub '${ResourceNamePrefix}-${EnvironmentType}-${ServiceName}-AWSPolicy'
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+            - s3:GetObject
+            - s3:GetObjectTagging
+            - s3:GetObjectVersion
+            Resource:
+            - Fn::Sub: arn:aws:s3:::${PipelineArtifactsBucketName}/*
+          - Effect: Allow
+            Action:
+            - ec2:CreateNetworkInterfacePermission
+            Resource:
+              Fn::Sub: arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/*
+          - Action:
+            - s3:ListBucket
+            Resource:
+            - Fn::Join:
+              - ''
+              - - 'arn:aws:s3:::'
+                - Ref: PipelineArtifactsBucketName
+            Effect: Allow
+          - Action:
+            - ecr:BatchCheckLayerAvailability
+            - ecr:CompleteLayerUpload
+            - ecr:InitiateLayerUpload
+            - ecr:PutImage
+            - ecr:UploadLayerPart
+            Resource:
+              Fn::Sub: arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ECRRepoName}
+            Effect: Allow
+          - Effect: Allow
+            Action:
+            - ecs:DescribeTaskDefinition
+            - ecs:RegisterTaskDefinition
+            Resource: "*"
+          - Action:
+            - ecs:UpdateService
+            - ecs:DescribeServices
+            - ecs:DescribeTasks
+            - ecs:DescribeClusters
+            Resource: 
+              - !Sub 'arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:cluster/${ClusterName}'
+              - !Sub 'arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:service/${ClusterName}/${ECSServiceName}'
+              - !Sub 'arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:task/${ClusterName}/*'
+            Effect: Allow
+          - Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+            Resource:
+              - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${GithubTokenSecretName}-*'
+              - !Join 
+                  - ''
+                  - - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:'
+                    - !Select [ 0, !Ref SonarDetails ]
+                    - '-*'
+          - Action:                   
+            - iam:PassRole
+            Resource: '*'
+            Effect: Allow
+          - Action:
+            - ecr:GetAuthorizationToken
+            Resource: "*"
+            Effect: Allow
+          - Effect: Allow
+            Action:
+            - s3:PutObject
+            - s3:PutObjectVersionTagging
+            - s3:PutObjectTagging
+            Resource:
+            - !Sub arn:aws:s3:::${PipelineArtifactsBucketName}/*
+          - Effect: Allow
+            Action:
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource: !Sub >-
+               arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:${ResourceNamePrefix}-${EnvironmentType}-CodeBuild-Logs:*
+          Version: '2012-10-17'
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Tags: 
+        - 
+          Key: Name
+          Value: !Sub '${ResourceNamePrefix}-${EnvironmentType}-${ServiceName}-CodeBuildProject'
+        -
+          Key: ApplicationRole
+          Value: !Sub '${ServiceName}-CodeBuild'  
+      Name: !Sub '${ResourceNamePrefix}-${EnvironmentType}-${ServiceName}-CodeBuild-Project'
+      Description: !Sub Docker Build for ${ServiceName}
+      LogsConfig:
+        CloudWatchLogs:
+          GroupName: !Sub '${ResourceNamePrefix}-${EnvironmentType}-CodeBuild-Logs'
+          Status: ENABLED
+          StreamName: !Sub '${ServiceName}-Build'
+      ServiceRole:
+        Fn::GetAtt:
+        - CodeBuildServiceRole
+        - Arn
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Environment:
+        Type:
+          Ref: CodebuildEnvironment
+        ComputeType:
+          Ref: EnvironmentComputeType
+        Image:
+          Ref: BuildImageVersion
+        PrivilegedMode: 'true'
+        EnvironmentVariables:
+        - Name: BUILD_OUTPUT_PREFIX
+          Value: !Sub '${EnvironmentType}-${ServiceName}/Package_Outputs/'
+        - Name: AWS_ACCOUNT_ID
+          Type: PLAINTEXT
+          Value: !Sub '${AWS::AccountId}'
+        - Name: TemplateURL 
+          Type: PLAINTEXT
+          Value: 
+            Fn::Sub: ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ECRRepoName}
+        - Name: Cluster
+          Type: PLAINTEXT
+          Value: !Ref ClusterName
+        - Name: Service
+          Type: PLAINTEXT
+          Value: !Ref ECSServiceName
+        - Name: TaskDefinition
+          Type: PLAINTEXT
+          Value: !Ref TaskDefinitionName 
+        - !If
+          - SonarProjectNameNotEmpty          
+          - Name: SonarQubeProjectName
+            Type: PLAINTEXT
+            Value: !Select [1, !Ref SonarDetails ]
+          - !Ref AWS::NoValue
+        - !If
+          - SonarProjectNameNotEmpty
+          - Name: SonarToken
+            Value:  !Sub
+                - '${SonarCheck}:SonarToken'
+                - SonarCheck: !Select [0, !Ref SonarDetails]
+            Type: SECRETS_MANAGER
+          - !Ref AWS::NoValue
+        - !If
+          - SonarProjectNameNotEmpty
+          - Name: SonarHost
+            Value: !Sub
+                - '${SonarCheck}:SonarHost'
+                - SonarCheck: !Select [0, !Ref SonarDetails]
+            Type: SECRETS_MANAGER
+          - !Ref AWS::NoValue
+        - !If
+          - SonarProjectNameNotEmpty
+          - Name: SonarUsername
+            Value: !Sub
+                - '${SonarCheck}:SonarUsername'
+                - SonarCheck: !Select [0, !Ref SonarDetails]
+            Type: SECRETS_MANAGER
+          - !Ref AWS::NoValue
+        - !If
+          - SonarProjectNameNotEmpty
+          - Name: SonarPassword
+            Value: !Sub
+                - '${SonarCheck}:SonarPassword'
+                - SonarCheck: !Select [0, !Ref SonarDetails]
+            Type: SECRETS_MANAGER
+          - !Ref AWS::NoValue
+        - Name: GithubToken
+          Value: !Sub '${GithubTokenSecretName}:GithubToken'
+          Type: SECRETS_MANAGER
+        - Name: EcrImageTagStoreName
+          Type: PLAINTEXT
+          Value: !Ref ECRImageTagStoreName
+        - !If
+          - S3EnvVar0Exist
+          - !Ref "AWS::NoValue"
+          - Name:  !Select [ 0, !Split [ ':', !Select [ 0, !Ref S3BucketBuildEnvs ] ] ]
+            Value:  !Select [ 1, !Split [ ':', !Select [ 0, !Ref S3BucketBuildEnvs ] ] ]
+        - !If
+          - S3EnvVar1Exist
+          - !Ref "AWS::NoValue"
+          - Name:  !Select [ 0, !Split [ ':', !Select [ 1, !Ref S3BucketBuildEnvs ] ] ]
+            Value:  !Select [ 1, !Split [ ':', !Select [ 1, !Ref S3BucketBuildEnvs ] ] ]
+        - !If
+          - S3EnvVar2Exist
+          - !Ref "AWS::NoValue"
+          - Name:  !Select [ 0, !Split [ ':', !Select [ 2, !Ref S3BucketBuildEnvs ] ] ]
+            Value:  !Select [ 1, !Split [ ':', !Select [ 2, !Ref S3BucketBuildEnvs ] ] ]
+        - !If
+          - S3EnvVar3Exist
+          - !Ref "AWS::NoValue"
+          - Name:  !Select [ 0, !Split [ ':', !Select [ 3, !Ref S3BucketBuildEnvs ] ] ]
+            Value:  !Select [ 1, !Split [ ':', !Select [ 3, !Ref S3BucketBuildEnvs ] ] ]
+        - !If
+          - S3EnvVar4Exist
+          - !Ref "AWS::NoValue"
+          - Name:  !Select [ 0, !Split [ ':', !Select [ 4, !Ref S3BucketBuildEnvs ] ] ]
+            Value:  !Select [ 1, !Split [ ':', !Select [ 4, !Ref S3BucketBuildEnvs ] ] ]
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref ServerlessSgId
+        Subnets:
+          Ref: AppSubnetIds
+        VpcId:
+          Ref: VpcId
+      Source:
+        Location:
+          !Sub https://github.com/${GithubUser}/${GithubRepoName}.git
+        Type: GITHUB
+      TimeoutInMinutes: 60
+      ConcurrentBuildLimit: 1
+      Cache:
+        Type: NO_CACHE
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Tags: 
+        - 
+          Key: Name
+          Value: !Sub '${ResourceNamePrefix}-${EnvironmentType}-${ServiceName}-Pipeline'
+        -
+          Key: ApplicationRole
+          Value: !Sub '${ServiceName}-CodePipeline'     
+      Name: !Sub '${EnvironmentType}-${ServiceName}'
+      RoleArn:
+        Fn::Join:
+        - ''
+        - - 'arn:aws:iam::'
+          - Ref: AWS::AccountId
+          - ":role/"
+          - Ref: CodePipelineExecutionRole
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Version: '1'
+                Provider: GitHub
+              OutputArtifacts:
+                - Name: Source
+              Configuration:
+                Owner: !Ref GithubUser
+                OAuthToken: !Sub '{{resolve:secretsmanager:${GithubTokenSecretName}:SecretString:GithubToken}}'
+                Branch: !Ref GithubBranchName
+                Repo: !Ref GithubRepoName
+                PollForSourceChanges: 'false'
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - Name: !Sub '${AWS::StackName}-Source'
+              InputArtifacts:
+                - Name: Source
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              OutputArtifacts:
+                - Name: Build
+              Configuration:
+                ProjectName: !Ref CodeBuildProject
+                EnvironmentVariables: "[{\"name\":\"Release_ID\",\"value\":\"#{codepipeline.PipelineExecutionId}\",\"type\":\"PLAINTEXT\"}]"
+              RunOrder: 1
+      ArtifactStore:
+        Type: S3
+        Location: !Ref PipelineArtifactsBucketName
